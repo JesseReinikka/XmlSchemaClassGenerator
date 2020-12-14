@@ -15,9 +15,13 @@ namespace XmlSchemaClassGenerator
         private readonly Dictionary<XmlQualifiedName, XmlSchemaAttributeGroup> AttributeGroups;
         private readonly Dictionary<XmlQualifiedName, XmlSchemaGroup> Groups;
         private readonly Dictionary<NamespaceKey, NamespaceModel> Namespaces = new Dictionary<NamespaceKey, NamespaceModel>();
-        private readonly Dictionary<XmlQualifiedName, TypeModel> Types = new Dictionary<XmlQualifiedName, TypeModel>();
+        private readonly Dictionary<string, TypeModel> Types = new Dictionary<string, TypeModel>();
+        private readonly Dictionary<XmlQualifiedName, HashSet<Substitute>> SubstitutionGroups = new Dictionary<XmlQualifiedName, HashSet<Substitute>>();
 
         private static readonly XmlQualifiedName AnyType = new XmlQualifiedName("anyType", XmlSchema.Namespace);
+
+        private string BuildKey(XmlSchemaAnnotated annotated, XmlQualifiedName name)
+            => $"{annotated.GetType()}:{annotated.SourceUri}:{annotated.LineNumber}:{annotated.LinePosition}:{name}";
 
         public ModelBuilder(GeneratorConfiguration configuration, XmlSchemaSet set)
         {
@@ -35,7 +39,8 @@ namespace XmlSchemaClassGenerator
                 UseDataTypeAttribute = false
             };
 
-            Types[AnyType] = objectModel;
+            var key = BuildKey(new XmlSchemaComplexType(), AnyType);
+            Types[key] = objectModel;
 
             AttributeGroups = set.Schemas().Cast<XmlSchema>().SelectMany(s => s.AttributeGroups.Values.Cast<XmlSchemaAttributeGroup>())
                 .DistinctBy(g => g.QualifiedName.ToString())
@@ -57,6 +62,134 @@ namespace XmlSchemaClassGenerator
                 CreateTypes(types);
                 var elements = set.GlobalElements.Values.Cast<XmlSchemaElement>().Where(s => s.GetSchema() == schema);
                 CreateElements(elements);
+            }
+
+            CreateSubstitutes();
+
+            if (configuration.GenerateInterfaces)
+            {
+                RenameInterfacePropertiesIfRenamedInDerivedClasses();
+                RemoveDuplicateInterfaceProperties();
+            }
+
+            AddXmlRootAttributeToAmbiguousTypes();
+        }
+
+        private void CreateSubstitutes()
+        {
+            var classesProps = Types.Values.OfType<ClassModel>().Select(c => c.Properties.Where(p => p.XmlSchemaName != null).ToList()).ToList();
+
+            foreach (var classProps in classesProps)
+            {
+                var order = 0;
+
+                foreach (var prop in classProps)
+                {
+                    if (_configuration.EmitOrder)
+                    {
+                        prop.Order = order;
+                        order++;
+                    }
+
+                    var substitutes = GetSubstitutedElements(prop.XmlSchemaName).ToList();
+
+                    if (_configuration.SeparateSubstitutes)
+                    {
+                        var elems = GetElements(prop.XmlParticle, prop.XmlParent);
+
+                        foreach (var substitute in substitutes)
+                        {
+                            var cls = (ClassModel)prop.OwningType;
+                            var schema = substitute.Element.GetSchema();
+                            var source = CodeUtilities.CreateUri(schema.SourceUri);
+                            var props = CreatePropertiesForElements(source, cls, prop.XmlParticle, elems, substitute, order);
+
+                            cls.Properties.AddRange(props);
+
+                            order += props.Count();
+                        }
+                    }
+                    else
+                    {
+                        prop.Substitutes = substitutes;
+                    }
+                }
+            }
+        }
+
+        private void AddXmlRootAttributeToAmbiguousTypes()
+        {
+            var ambiguousTypes = Types.Values.Where(t=>t.RootElementName == null && !(t is InterfaceModel)).GroupBy(t => t.Name);
+            foreach (var ambiguousTypeGroup in ambiguousTypes)
+            {
+                var types = ambiguousTypeGroup.ToList();
+                if (types.Count == 1)
+                {
+                    continue;
+                }
+                foreach (var typeModel in types)
+                {
+                    typeModel.RootElementName = typeModel.GetQualifiedName();
+                }
+            }
+        }
+
+        private void RemoveDuplicateInterfaceProperties()
+        {
+            foreach (var interfaceModel in Types.Values.OfType<InterfaceModel>())
+            {
+                var parentProperties = interfaceModel.Properties.ToList();
+                foreach (var baseInterfaceType in interfaceModel.AllDerivedReferenceTypes().OfType<InterfaceModel>())
+                {
+                    foreach (var parentProperty in parentProperties)
+                    {
+                        var baseProperties = baseInterfaceType.Properties.ToList();
+                        foreach (var baseProperty in baseProperties.Where(baseProperty => parentProperty.Name == baseProperty.Name && parentProperty.Type.Name == baseProperty.Type.Name))
+                        {
+                            baseInterfaceType.Properties.Remove(baseProperty);
+                        }
+                    }
+                }
+            }
+        }
+
+        private void RenameInterfacePropertiesIfRenamedInDerivedClasses()
+        {
+            foreach (var interfaceModel in Types.Values.OfType<InterfaceModel>())
+            {
+                foreach (var interfaceProperty in interfaceModel.Properties)
+                {
+                    foreach (var implementationClass in interfaceModel.AllDerivedReferenceTypes())
+                    {
+                        foreach (var implementationClassProperty in implementationClass.Properties)
+                        {
+                            if (implementationClassProperty.Name != implementationClassProperty.OriginalPropertyName
+                                && implementationClassProperty.OriginalPropertyName == interfaceProperty.Name
+                                && implementationClassProperty.XmlSchemaName == interfaceProperty.XmlSchemaName
+                                && implementationClassProperty.XmlParent?.Parent is XmlSchemaGroup implementationGroup
+                                && interfaceProperty.XmlParent?.Parent is XmlSchemaGroup interfaceGroup
+                                && implementationGroup.QualifiedName == interfaceGroup.QualifiedName)
+                            {
+                                RenameInterfacePropertyInBaseClasses(interfaceModel, implementationClass, interfaceProperty, implementationClassProperty.Name);
+                                interfaceProperty.Name = implementationClassProperty.Name;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        private static void RenameInterfacePropertyInBaseClasses(InterfaceModel interfaceModel, ReferenceTypeModel implementationClass,
+            PropertyModel interfaceProperty, string newName)
+        {
+            foreach (var interfaceModelImplementationClass in interfaceModel.AllDerivedReferenceTypes().Where(c =>
+                c != implementationClass))
+            {
+                foreach (var propertyModel in interfaceModelImplementationClass.Properties.Where(p =>
+                    p.Name == interfaceProperty.Name))
+                {
+                    propertyModel.Name = newName;
+                }
             }
         }
 
@@ -101,6 +234,7 @@ namespace XmlSchemaClassGenerator
                 var qualifiedName = rootElement.ElementSchemaType.QualifiedName;
                 if (qualifiedName.IsEmpty) { qualifiedName = rootElement.QualifiedName; }
                 var type = CreateTypeModel(source, rootElement.ElementSchemaType, qualifiedName);
+                ClassModel derivedClassModel = null;
 
                 if (type.RootElementName != null)
                 {
@@ -109,7 +243,7 @@ namespace XmlSchemaClassGenerator
                         // There is already another global element with this type.
                         // Need to create an empty derived class.
 
-                        var derivedClassModel = new ClassModel(_configuration)
+                        derivedClassModel = new ClassModel(_configuration)
                         {
                             Name = _configuration.NamingProvider.RootClassNameFromQualifiedName(rootElement.QualifiedName),
                             Namespace = CreateNamespaceModel(source, rootElement.QualifiedName)
@@ -123,7 +257,8 @@ namespace XmlSchemaClassGenerator
                             derivedClassModel.Namespace.Types[derivedClassModel.Name] = derivedClassModel;
                         }
 
-                        Types[rootElement.QualifiedName] = derivedClassModel;
+                        var key = BuildKey(rootElement, rootElement.QualifiedName);
+                        Types[key] = derivedClassModel;
 
                         derivedClassModel.BaseClass = classModel;
                         ((ClassModel)derivedClassModel.BaseClass).DerivedTypes.Add(derivedClassModel);
@@ -132,7 +267,8 @@ namespace XmlSchemaClassGenerator
                     }
                     else
                     {
-                        Types[rootElement.QualifiedName] = type;
+                        var key = BuildKey(rootElement, rootElement.QualifiedName);
+                        Types[key] = type;
                     }
                 }
                 else
@@ -140,21 +276,41 @@ namespace XmlSchemaClassGenerator
                     if (type is ClassModel classModel)
                     {
                         classModel.Documentation.AddRange(GetDocumentation(rootElement));
-                        if (!rootElement.SubstitutionGroup.IsEmpty)
-                        {
-                            classModel.IsSubstitution = true;
-                            classModel.SubstitutionName = rootElement.QualifiedName;
-                        }
                     }
 
                     type.RootElementName = rootElement.QualifiedName;
+                }
+
+                if (!rootElement.SubstitutionGroup.IsEmpty)
+                {
+                    if (!SubstitutionGroups.TryGetValue(rootElement.SubstitutionGroup, out var substitutes))
+                    {
+                        substitutes = new HashSet<Substitute>();
+                        SubstitutionGroups.Add(rootElement.SubstitutionGroup, substitutes);
+                    }
+
+                    substitutes.Add(new Substitute { Element = rootElement, Type = derivedClassModel ?? type });
+                }
+            }
+        }
+
+        private IEnumerable<Substitute> GetSubstitutedElements(XmlQualifiedName name)
+        {
+            if (SubstitutionGroups.TryGetValue(name, out var substitutes))
+            {
+                foreach (var substitute in substitutes)
+                {
+                    yield return substitute;
+                    foreach (var recursiveSubstitute in GetSubstitutedElements(substitute.Element.QualifiedName))
+                        yield return recursiveSubstitute;
                 }
             }
         }
 
         private TypeModel CreateTypeModel(Uri source, XmlSchemaAnnotated type, XmlQualifiedName qualifiedName)
         {
-            if (!qualifiedName.IsEmpty && Types.TryGetValue(qualifiedName, out TypeModel typeModel))
+            var key = BuildKey(type, qualifiedName);
+            if (!qualifiedName.IsEmpty && Types.TryGetValue(key, out TypeModel typeModel))
             {
                 return typeModel;
             }
@@ -197,7 +353,12 @@ namespace XmlSchemaClassGenerator
             interfaceModel.Documentation.AddRange(docs);
 
             if (namespaceModel != null) { namespaceModel.Types[name] = interfaceModel; }
-            if (!qualifiedName.IsEmpty) { Types[qualifiedName] = interfaceModel; }
+
+            if (!qualifiedName.IsEmpty)
+            {
+                var key = BuildKey(group, qualifiedName);
+                Types[key] = interfaceModel;
+            }
 
             var particle = group.Particle;
             var items = GetElements(particle);
@@ -205,7 +366,7 @@ namespace XmlSchemaClassGenerator
             interfaceModel.Properties.AddRange(properties);
             var interfaces = items.Select(i => i.XmlParticle).OfType<XmlSchemaGroupRef>()
                 .Select(i => (InterfaceModel)CreateTypeModel(CodeUtilities.CreateUri(i.SourceUri), Groups[i.RefName], i.RefName));
-            interfaceModel.Interfaces.AddRange(interfaces);
+            interfaceModel.AddInterfaces(interfaces);
 
             return interfaceModel;
         }
@@ -225,14 +386,19 @@ namespace XmlSchemaClassGenerator
             interfaceModel.Documentation.AddRange(docs);
 
             if (namespaceModel != null) { namespaceModel.Types[name] = interfaceModel; }
-            if (!qualifiedName.IsEmpty) { Types[qualifiedName] = interfaceModel; }
+
+            if (!qualifiedName.IsEmpty)
+            {
+                var key = BuildKey(attributeGroup, qualifiedName);
+                Types[key] = interfaceModel;
+            }
 
             var items = attributeGroup.Attributes;
             var properties = CreatePropertiesForAttributes(source, interfaceModel, items.OfType<XmlSchemaAttribute>());
             interfaceModel.Properties.AddRange(properties);
             var interfaces = items.OfType<XmlSchemaAttributeGroupRef>()
                 .Select(a => (InterfaceModel)CreateTypeModel(CodeUtilities.CreateUri(a.SourceUri), AttributeGroups[a.RefName], a.RefName));
-            interfaceModel.Interfaces.AddRange(interfaces);
+            interfaceModel.AddInterfaces(interfaces);
 
             return interfaceModel;
         }
@@ -254,7 +420,7 @@ namespace XmlSchemaClassGenerator
                 IsAbstract = complexType.IsAbstract,
                 IsAnonymous = string.IsNullOrEmpty(complexType.QualifiedName.Name),
                 IsMixed = complexType.IsMixed,
-                IsSubstitution = complexType.Parent is XmlSchemaElement && !((XmlSchemaElement)complexType.Parent).SubstitutionGroup.IsEmpty
+                IsSubstitution = complexType.Parent is XmlSchemaElement parent && !parent.SubstitutionGroup.IsEmpty
             };
 
             classModel.Documentation.AddRange(docs);
@@ -264,7 +430,11 @@ namespace XmlSchemaClassGenerator
                 namespaceModel.Types[classModel.Name] = classModel;
             }
 
-            if (!qualifiedName.IsEmpty) { Types[qualifiedName] = classModel; }
+            if (!qualifiedName.IsEmpty)
+            {
+                var key = BuildKey(complexType, qualifiedName);
+                Types[key] = classModel;
+            }
 
             if (complexType.BaseXmlSchemaType != null && complexType.BaseXmlSchemaType.QualifiedName != AnyType)
             {
@@ -286,16 +456,18 @@ namespace XmlSchemaClassGenerator
             }
             else particle = complexType.Particle ?? complexType.ContentTypeParticle;
 
-            var items = GetElements(particle, complexType);
-            var properties = CreatePropertiesForElements(source, classModel, particle, items);
-            classModel.Properties.AddRange(properties);
+            var items = GetElements(particle, complexType).ToList();
 
             if (_configuration.GenerateInterfaces)
             {
                 var interfaces = items.Select(i => i.XmlParticle).OfType<XmlSchemaGroupRef>()
-                    .Select(i => (InterfaceModel)CreateTypeModel(CodeUtilities.CreateUri(i.SourceUri), Groups[i.RefName], i.RefName));
-                classModel.Interfaces.AddRange(interfaces);
+                    .Select(i => (InterfaceModel)CreateTypeModel(CodeUtilities.CreateUri(i.SourceUri), Groups[i.RefName], i.RefName)).ToList();
+
+                classModel.AddInterfaces(interfaces);
             }
+
+            var properties = CreatePropertiesForElements(source, classModel, particle, items);
+            classModel.Properties.AddRange(properties);
 
             XmlSchemaObjectCollection attributes = null;
             if (classModel.BaseClass != null)
@@ -312,7 +484,20 @@ namespace XmlSchemaClassGenerator
                 // If it's a restriction, do not duplicate attributes on the derived class, they're already in the base class.
                 // See https://msdn.microsoft.com/en-us/library/f3z3wh0y.aspx
             }
-            else { attributes = complexType.Attributes; }
+            else
+            {
+                attributes = complexType.Attributes;
+
+                if (attributes.Count == 0 && complexType.ContentModel != null)
+                {
+                    var content = complexType.ContentModel.Content;
+
+                    if (content is XmlSchemaComplexContentExtension extension)
+                        attributes = extension.Attributes;
+                    else if (content is XmlSchemaComplexContentRestriction restriction)
+                        attributes = restriction.Attributes;
+                }
+            }
 
             if (attributes != null)
             {
@@ -323,7 +508,7 @@ namespace XmlSchemaClassGenerator
                 {
                     var attributeInterfaces = attributes.OfType<XmlSchemaAttributeGroupRef>()
                         .Select(i => (InterfaceModel)CreateTypeModel(CodeUtilities.CreateUri(i.SourceUri), AttributeGroups[i.RefName], i.RefName));
-                    classModel.Interfaces.AddRange(attributeInterfaces);
+                    classModel.AddInterfaces(attributeInterfaces);
                 }
             }
 
@@ -351,12 +536,19 @@ namespace XmlSchemaClassGenerator
         private TypeModel CreateTypeModel(XmlSchemaSimpleType simpleType, NamespaceModel namespaceModel, XmlQualifiedName qualifiedName, List<DocumentationModel> docs)
         {
             var restrictions = new List<RestrictionModel>();
+            List<XmlSchemaFacet> facets = new List<XmlSchemaFacet>();
 
             if (simpleType.Content is XmlSchemaSimpleTypeRestriction typeRestriction)
+                facets = typeRestriction.Facets.Cast<XmlSchemaFacet>().ToList();
+            else if (simpleType.Content is XmlSchemaSimpleTypeUnion typeUnion
+                && typeUnion.BaseMemberTypes.All(b => b.Content is XmlSchemaSimpleTypeRestriction r && r.Facets.Count > 0))
+                facets = typeUnion.BaseMemberTypes.SelectMany(b => ((XmlSchemaSimpleTypeRestriction)b.Content).Facets.Cast<XmlSchemaFacet>()).ToList();
+
+            if (facets.Any())
             {
-                var enumFacets = typeRestriction.Facets.OfType<XmlSchemaEnumerationFacet>().ToList();
-                // If there's a pattern restriction mixed into the enumeration values, we'll generate a string to play it safe.
-                var isEnum = enumFacets.Count > 0 && !typeRestriction.Facets.OfType<XmlSchemaPatternFacet>().Any();
+                var enumFacets = facets.OfType<XmlSchemaEnumerationFacet>().ToList();
+                // If there are other restrictions mixed into the enumeration values, we'll generate a string to play it safe.
+                var isEnum = enumFacets.Count > 0 && enumFacets.Count == facets.Count;
                 if (isEnum)
                 {
                     // we got an enum
@@ -369,6 +561,7 @@ namespace XmlSchemaClassGenerator
                         Namespace = namespaceModel,
                         XmlSchemaName = qualifiedName,
                         XmlSchemaType = simpleType,
+                        IsAnonymous = string.IsNullOrEmpty(simpleType.QualifiedName.Name),
                     };
 
                     enumModel.Documentation.AddRange(docs);
@@ -391,6 +584,7 @@ namespace XmlSchemaClassGenerator
                         enumModel.Values.Add(value);
                     }
 
+                    enumModel.Values = EnsureEnumValuesUnique(enumModel.Values);
                     if (namespaceModel != null)
                     {
                         namespaceModel.Types[enumModel.Name] = enumModel;
@@ -398,13 +592,14 @@ namespace XmlSchemaClassGenerator
 
                     if (!qualifiedName.IsEmpty)
                     {
-                        Types[qualifiedName] = enumModel;
+                        var key = BuildKey(simpleType, qualifiedName);
+                        Types[key] = enumModel;
                     }
 
                     return enumModel;
                 }
 
-                restrictions = GetRestrictions(typeRestriction.Facets.Cast<XmlSchemaFacet>(), simpleType).Where(r => r != null).Sanitize().ToList();
+                restrictions = GetRestrictions(facets, simpleType).Where(r => r != null).Sanitize().ToList();
             }
 
             var simpleModelName = _configuration.NamingProvider.SimpleTypeNameFromQualifiedName(qualifiedName);
@@ -427,9 +622,30 @@ namespace XmlSchemaClassGenerator
                 namespaceModel.Types[simpleModel.Name] = simpleModel;
             }
 
-            if (!qualifiedName.IsEmpty) { Types[qualifiedName] = simpleModel; }
+            if (!qualifiedName.IsEmpty)
+            {
+                var key = BuildKey(simpleType, qualifiedName);
+                Types[key] = simpleModel;
+            }
 
             return simpleModel;
+        }
+
+        private static List<EnumValueModel> EnsureEnumValuesUnique(List<EnumValueModel> enumModelValues)
+        {
+            var enumValueGroups = from enumValue in enumModelValues
+                group enumValue by enumValue.Name;
+
+            foreach (var g in enumValueGroups)
+            {
+                var i = 1;
+                foreach (var t in g.Skip(1))
+                {
+                    t.Name = $"{t.Name}{i++}";
+                }
+            }
+
+            return enumModelValues;
         }
 
         private IEnumerable<PropertyModel> CreatePropertiesForAttributes(Uri source, TypeModel typeModel, IEnumerable<XmlSchemaObject> items)
@@ -445,7 +661,10 @@ namespace XmlSchemaClassGenerator
                         var attributeQualifiedName = attribute.AttributeSchemaType.QualifiedName;
                         var attributeName = _configuration.NamingProvider.AttributeNameFromQualifiedName(attribute.QualifiedName);
 
-                        if (attribute.Parent is XmlSchemaAttributeGroup attributeGroup && attributeGroup.QualifiedName != typeModel.XmlSchemaName && Types.TryGetValue(attributeGroup.QualifiedName, out var typeModelValue) && typeModelValue is InterfaceModel interfaceTypeModel)
+                        if (attribute.Parent is XmlSchemaAttributeGroup attributeGroup
+                            && attributeGroup.QualifiedName != typeModel.XmlSchemaName
+                            && Types.TryGetValue(BuildKey(attributeGroup, attributeGroup.QualifiedName), out var typeModelValue)
+                            && typeModelValue is InterfaceModel interfaceTypeModel)
                         {
                             var interfaceProperty = interfaceTypeModel.Properties.Single(p => p.XmlSchemaName == attribute.QualifiedName);
                             attributeQualifiedName = interfaceProperty.Type.XmlSchemaName;
@@ -478,6 +697,8 @@ namespace XmlSchemaClassGenerator
                             }
                         }
 
+                        attributeName = typeModel.GetUniquePropertyName(attributeName);
+
                         var property = new PropertyModel(_configuration)
                         {
                             OwningType = typeModel,
@@ -488,9 +709,18 @@ namespace XmlSchemaClassGenerator
                             IsNullable = attribute.Use != XmlSchemaUse.Required,
                             DefaultValue = attribute.DefaultValue ?? (attribute.Use != XmlSchemaUse.Optional ? attribute.FixedValue : null),
                             FixedValue = attribute.FixedValue,
-                            Form = attribute.Form == XmlSchemaForm.None ? attribute.GetSchema().AttributeFormDefault : attribute.Form,
                             XmlNamespace = !string.IsNullOrEmpty(attribute.QualifiedName.Namespace) && attribute.QualifiedName.Namespace != typeModel.XmlSchemaName.Namespace ? attribute.QualifiedName.Namespace : null,
                         };
+
+                        if (attribute.Form == XmlSchemaForm.None)
+                        {
+                            if (attribute.RefName != null && !attribute.RefName.IsEmpty)
+                                property.Form = XmlSchemaForm.Qualified;
+                            else
+                                property.Form = attribute.GetSchema().AttributeFormDefault;
+                        }
+                        else
+                            property.Form = attribute.Form;
 
                         var attributeDocs = GetDocumentation(attribute);
                         property.Documentation.AddRange(attributeDocs);
@@ -514,10 +744,10 @@ namespace XmlSchemaClassGenerator
             return properties;
         }
 
-        private IEnumerable<PropertyModel> CreatePropertiesForElements(Uri source, TypeModel typeModel, XmlSchemaParticle particle, IEnumerable<Particle> items)
+        private IEnumerable<PropertyModel> CreatePropertiesForElements(Uri source, TypeModel typeModel, XmlSchemaParticle particle, IEnumerable<Particle> items,
+            Substitute substitute = null, int order = 0)
         {
             var properties = new List<PropertyModel>();
-            var order = 0;
 
             foreach (var item in items)
             {
@@ -548,25 +778,31 @@ namespace XmlSchemaClassGenerator
                         }
                     }
 
-                    var propertyName = _configuration.NamingProvider.ElementNameFromQualifiedName(element.QualifiedName);
+                    var effectiveElement = substitute?.Element ?? element;
+                    var propertyName = _configuration.NamingProvider.ElementNameFromQualifiedName(effectiveElement.QualifiedName);
+                    var originalPropertyName = propertyName;
                     if (propertyName == typeModel.Name)
                     {
                         propertyName += "Property"; // member names cannot be the same as their enclosing type
                     }
 
+                    propertyName = typeModel.GetUniquePropertyName(propertyName);
+
                     property = new PropertyModel(_configuration)
                     {
                         OwningType = typeModel,
-                        XmlSchemaName = element.QualifiedName,
+                        XmlSchemaName = effectiveElement.QualifiedName,
                         Name = propertyName,
-                        Type = CreateTypeModel(source, element.ElementSchemaType, elementQualifiedName),
+                        OriginalPropertyName = originalPropertyName,
+                        Type = substitute?.Type ?? CreateTypeModel(source, element.ElementSchemaType, elementQualifiedName),
                         IsNillable = element.IsNillable,
                         IsNullable = item.MinOccurs < 1.0m || (item.XmlParent is XmlSchemaChoice),
                         IsCollection = item.MaxOccurs > 1.0m || particle.MaxOccurs > 1.0m, // http://msdn.microsoft.com/en-us/library/vstudio/d3hx2s7e(v=vs.100).aspx
                         DefaultValue = element.DefaultValue ?? ((item.MinOccurs >= 1.0m && !(item.XmlParent is XmlSchemaChoice)) ? element.FixedValue : null),
                         FixedValue = element.FixedValue,
                         Form = element.Form == XmlSchemaForm.None ? element.GetSchema().ElementFormDefault : element.Form,
-                        XmlNamespace = !string.IsNullOrEmpty(element.QualifiedName.Namespace) && element.QualifiedName.Namespace != typeModel.XmlSchemaName.Namespace ? element.QualifiedName.Namespace : null,
+                        XmlNamespace = !string.IsNullOrEmpty(effectiveElement.QualifiedName.Namespace) && effectiveElement.QualifiedName.Namespace != typeModel.XmlSchemaName.Namespace
+                            ? effectiveElement.QualifiedName.Namespace : null,
                         XmlParticle = item.XmlParticle,
                         XmlParent = item.XmlParent,
                     };
@@ -596,13 +832,19 @@ namespace XmlSchemaClassGenerator
                     {
                         if (item.XmlParticle is XmlSchemaGroupRef groupRef)
                         {
+                            var group = Groups[groupRef.RefName];
+
                             if (_configuration.GenerateInterfaces)
                             {
-                                CreateTypeModel(CodeUtilities.CreateUri(groupRef.SourceUri), Groups[groupRef.RefName], groupRef.RefName);
+                                CreateTypeModel(CodeUtilities.CreateUri(groupRef.SourceUri), group, groupRef.RefName);
                             }
 
-                            var groupItems = GetElements(groupRef.Particle);
-                            var groupProperties = CreatePropertiesForElements(source, typeModel, item.XmlParticle, groupItems);
+                            var groupItems = GetElements(group.Particle);
+                            var groupProperties = CreatePropertiesForElements(source, typeModel, item.XmlParticle, groupItems, order: order).ToList();
+                            if (_configuration.EmitOrder)
+                            {
+                                order += groupProperties.Count;
+                            }
                             properties.AddRange(groupProperties);
                         }
                     }
@@ -669,6 +911,20 @@ namespace XmlSchemaClassGenerator
 
             foreach (var facet in facets)
             {
+                if (facet is XmlSchemaLengthFacet)
+                {
+                    var value = int.Parse(facet.Value);
+                    if (_configuration.DataAnnotationMode == DataAnnotationMode.All)
+                    {
+                        yield return new MinLengthRestrictionModel(_configuration) { Value = value };
+                        yield return new MaxLengthRestrictionModel(_configuration) { Value = value };
+                    }
+                    else
+                    {
+                        yield return new MinMaxLengthRestrictionModel(_configuration) { Min = value, Max = value };
+                    }
+                }
+
                 if (facet is XmlSchemaTotalDigitsFacet)
                 {
                     yield return new TotalDigitsRestrictionModel(_configuration) { Value = int.Parse(facet.Value) };
@@ -706,13 +962,16 @@ namespace XmlSchemaClassGenerator
 
         public IEnumerable<Particle> GetElements(XmlSchemaGroupBase groupBase)
         {
-            foreach (var item in groupBase.Items)
+            if (groupBase?.Items != null)
             {
-                foreach (var element in GetElements(item, groupBase))
+                foreach (var item in groupBase.Items)
                 {
-                    element.MaxOccurs = Math.Max(element.MaxOccurs, groupBase.MaxOccurs);
-                    element.MinOccurs = Math.Min(element.MinOccurs, groupBase.MinOccurs);
-                    yield return element;
+                    foreach (var element in GetElements(item, groupBase))
+                    {
+                        element.MaxOccurs = Math.Max(element.MaxOccurs, groupBase.MaxOccurs);
+                        element.MinOccurs = Math.Min(element.MinOccurs, groupBase.MinOccurs);
+                        yield return element;
+                    }
                 }
             }
         }

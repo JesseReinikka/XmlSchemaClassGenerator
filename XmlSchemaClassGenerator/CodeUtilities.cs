@@ -57,11 +57,66 @@ namespace XmlSchemaClassGenerator
 
         private static Type GetIntegerDerivedType(XmlSchemaDatatype type, GeneratorConfiguration configuration, IEnumerable<RestrictionModel> restrictions)
         {
-            if (configuration.IntegerDataType != null) return configuration.IntegerDataType;
+            if (configuration.IntegerDataType != null && !configuration.UseIntegerDataTypeAsFallback) return configuration.IntegerDataType;
 
             var xmlTypeCode = type.TypeCode;
 
             Type result = null;
+
+            var maxInclusive = restrictions.OfType<MaxInclusiveRestrictionModel>().SingleOrDefault();
+            var minInclusive = restrictions.OfType<MinInclusiveRestrictionModel>().SingleOrDefault();
+
+            decimal? maxInclusiveValue = null;
+            if (maxInclusive is null && xmlTypeCode == XmlTypeCode.NegativeInteger)
+            {
+                maxInclusiveValue = -1;
+            }
+            else if (maxInclusive is null && xmlTypeCode == XmlTypeCode.NonPositiveInteger)
+            {
+                maxInclusiveValue = 0;
+            }
+            else if (maxInclusive != null && decimal.TryParse(maxInclusive.Value, out decimal value))
+            {
+                maxInclusiveValue = value;
+            }
+
+            decimal? minInclusiveValue = null;
+            if (minInclusive is null && xmlTypeCode == XmlTypeCode.PositiveInteger)
+            {
+                minInclusiveValue = 1;
+            }
+            else if (minInclusive is null && xmlTypeCode == XmlTypeCode.NonNegativeInteger)
+            {
+                minInclusiveValue = 0;
+            }
+            else if (minInclusive != null && decimal.TryParse(minInclusive.Value, out decimal value))
+            {
+                minInclusiveValue = value;
+            }
+
+            // If either value is null, then that value is either unbounded or too large to fit in any numeric type.
+            if (minInclusiveValue != null && maxInclusiveValue != null) {
+                if (minInclusiveValue >= byte.MinValue && maxInclusiveValue <= byte.MaxValue)
+                    result = typeof(byte);
+                else if (minInclusiveValue >= sbyte.MinValue && maxInclusiveValue <= sbyte.MaxValue)
+                    result = typeof(sbyte);
+                else if (minInclusiveValue >= ushort.MinValue && maxInclusiveValue <= ushort.MaxValue)
+                    result = typeof(ushort);
+                else if (minInclusiveValue >= short.MinValue && maxInclusiveValue <= short.MaxValue)
+                    result = typeof(short);
+                else if (minInclusiveValue >= uint.MinValue && maxInclusiveValue <= uint.MaxValue)
+                    result = typeof(uint);
+                else if (minInclusiveValue >= int.MinValue && maxInclusiveValue <= int.MaxValue)
+                    result = typeof(int);
+                else if (minInclusiveValue >= ulong.MinValue && maxInclusiveValue <= ulong.MaxValue)
+                    result = typeof(ulong);
+                else if (minInclusiveValue >= long.MinValue && maxInclusiveValue <= long.MaxValue)
+                    result = typeof(long);
+                else // If it didn't fit in a decimal, we could not have gotten here.
+                    result = typeof(decimal);
+
+                return result;
+            }
 
             if (!(restrictions.SingleOrDefault(r => r is TotalDigitsRestrictionModel) is TotalDigitsRestrictionModel totalDigits)
                 || ((xmlTypeCode == XmlTypeCode.PositiveInteger
@@ -70,6 +125,8 @@ namespace XmlSchemaClassGenerator
                      || xmlTypeCode == XmlTypeCode.NegativeInteger
                      || xmlTypeCode == XmlTypeCode.NonPositiveInteger) && totalDigits.Value >= 29))
             {
+                if (configuration.UseIntegerDataTypeAsFallback && configuration.IntegerDataType != null)
+                  return configuration.IntegerDataType;
                 return typeof(string);
             }
 
@@ -193,7 +250,14 @@ namespace XmlSchemaClassGenerator
             XmlQualifiedName qualifiedName;
             if (!(typeModel is SimpleModel simpleTypeModel))
             {
-                qualifiedName = typeModel.XmlSchemaType.GetQualifiedName();
+                if (typeModel.IsAnonymous)
+                {
+                    qualifiedName = typeModel.XmlSchemaName;
+                }
+                else
+                {
+                    qualifiedName = typeModel.XmlSchemaType.GetQualifiedName();
+                }
             }
             else
             {
@@ -265,6 +329,23 @@ namespace XmlSchemaClassGenerator
             return string.Format("{0}{1}", propBackingFieldName, i);
         }
 
+        public static string GetUniquePropertyName(this TypeModel tm, string name)
+        {
+            if (tm is ClassModel cls)
+            {
+                var i = 0;
+                var n = name;
+                var baseClasses = cls.AllBaseClasses.ToList();
+
+                while (baseClasses.SelectMany(b => b.Properties).Any(p => p.Name == n))
+                    n = name + (++i);
+
+                return n;
+            }
+
+            return name;
+        }
+
         static readonly Regex NormalizeNewlinesRegex = new Regex(@"(^|[^\r])\n", RegexOptions.Compiled);
 
         internal static string NormalizeNewlines(string text)
@@ -301,6 +382,11 @@ namespace XmlSchemaClassGenerator
         public static KeyValuePair<NamespaceKey, string> ParseNamespace(string nsArg, string namespacePrefix)
         {
             var parts = nsArg.Split(new[] { '=' }, 2);
+            if (parts.Length != 2)
+            {
+                throw new ArgumentException("XML and C# namespaces should be separated by '='.");
+            }
+            
             var xmlNs = parts[0];
             var netNs = parts[1];
             var parts2 = xmlNs.Split(new[] { '|' }, 2);

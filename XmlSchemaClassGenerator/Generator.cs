@@ -3,6 +3,7 @@ using System.CodeDom;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Text;
 using System.Xml;
 using System.Xml.Schema;
 
@@ -11,6 +12,8 @@ namespace XmlSchemaClassGenerator
     public class Generator
     {
         private readonly GeneratorConfiguration _configuration = new GeneratorConfiguration();
+
+        public GeneratorConfiguration Configuration => _configuration;
 
         public NamespaceProvider NamespaceProvider
         {
@@ -154,6 +157,12 @@ namespace XmlSchemaClassGenerator
             set { _configuration.IntegerDataType = value; }
         }
 
+        public bool UseIntegerDataTypeAsFallback
+        {
+            get { return _configuration.UseIntegerDataTypeAsFallback; }
+            set { _configuration.UseIntegerDataTypeAsFallback = value; }
+        }
+
         public bool EntityFramework
         {
             get { return _configuration.EntityFramework; }
@@ -178,6 +187,12 @@ namespace XmlSchemaClassGenerator
             set { _configuration.CodeTypeReferenceOptions = value; }
         }
 
+        public CollectionSettersMode CollectionSettersMode
+        {
+            get { return _configuration.CollectionSettersMode; }
+            set { _configuration.CollectionSettersMode = value; }
+        }
+
         public string TextValuePropertyName
         {
             get { return _configuration.TextValuePropertyName; }
@@ -193,6 +208,15 @@ namespace XmlSchemaClassGenerator
             set { _configuration.MemberVisitor = value; }
         }
 
+        /// <summary>
+        /// Optional delegate that is called for each generated type (class, interface, enum)
+        /// </summary>
+        public Action<CodeTypeDeclaration, TypeModel> TypeVisitor
+        {
+            get { return _configuration.TypeVisitor; }
+            set { _configuration.TypeVisitor = value; }
+        }
+
         public VersionProvider Version
         {
             get { return _configuration.Version; }
@@ -205,6 +229,12 @@ namespace XmlSchemaClassGenerator
             set { _configuration.DisableComments = value; }
         }
 
+        public bool DoNotForceIsNullable
+        {
+            get { return _configuration.DoNotForceIsNullable; }
+            set { _configuration.DoNotForceIsNullable = value; }
+        }
+
         public string PrivateMemberPrefix
         {
             get { return _configuration.PrivateMemberPrefix; }
@@ -215,6 +245,23 @@ namespace XmlSchemaClassGenerator
         {
             get { return _configuration.EnableUpaCheck; }
             set { _configuration.EnableUpaCheck = value; }
+        }
+
+        public bool SeparateClasses
+        {
+            get { return _configuration.SeparateClasses; }
+            set { _configuration.SeparateClasses = value; }
+        }
+
+        public bool SeparateSubstitutes
+        {
+            get { return _configuration.SeparateSubstitutes; }
+            set { _configuration.SeparateSubstitutes = value; }
+        }
+
+        static Generator()
+        {
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
         }
 
         public void Generate(IEnumerable<string> files)

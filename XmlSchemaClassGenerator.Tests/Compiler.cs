@@ -47,6 +47,7 @@ namespace XmlSchemaClassGenerator.Tests
             "System.Private.Xml",
             "System.Private.Xml.Linq",
             "System.Runtime",
+            "System.Runtime.Extensions",
             "System.Xml.XDocument",
             "System.Xml.XmlSerializer",
         };
@@ -84,7 +85,7 @@ namespace XmlSchemaClassGenerator.Tests
                 TextValuePropertyName = "Value"
             };
 
-            var output = new FileWatcherOutputWriter(Path.Combine("output", name));
+            var output = generatorPrototype.OutputWriter as FileWatcherOutputWriter ?? new FileWatcherOutputWriter(Path.Combine("output", name));
 
             var gen = new Generator
             {
@@ -101,9 +102,16 @@ namespace XmlSchemaClassGenerator.Tests
                 MemberVisitor = generatorPrototype.MemberVisitor,
                 GenerateDescriptionAttribute = generatorPrototype.GenerateDescriptionAttribute,
                 CodeTypeReferenceOptions = generatorPrototype.CodeTypeReferenceOptions,
+                CollectionSettersMode = generatorPrototype.CollectionSettersMode,
                 TextValuePropertyName = generatorPrototype.TextValuePropertyName,
-                EmitOrder = generatorPrototype.EmitOrder
+                EmitOrder = generatorPrototype.EmitOrder,
+                SeparateClasses = generatorPrototype.SeparateClasses,
+                CollectionType = generatorPrototype.CollectionType,
+                CollectionImplementationType = generatorPrototype.CollectionImplementationType,
+                SeparateSubstitutes = generatorPrototype.SeparateSubstitutes
             };
+
+            output.Configuration = gen.Configuration;
 
             gen.Generate(files);
 

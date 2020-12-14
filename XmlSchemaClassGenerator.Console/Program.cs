@@ -21,7 +21,8 @@ namespace XmlSchemaClassGenerator.Console
             var showHelp = args.Length == 0;
             var namespaces = new List<string>();
             var outputFolder = (string)null;
-            var integerType = typeof(string);
+            Type integerType = null;
+            var useIntegerTypeAsFallback = false;
             var namespacePrefix = "";
             var verbose = false;
             var nullables = false;
@@ -43,6 +44,10 @@ namespace XmlSchemaClassGenerator.Console
             var enableUpaCheck = true;
             var generateComplexTypesForCollections = true;
             var useShouldSerialize = false;
+            var separateClasses = false;
+            var separateSubstitutes = false;
+            var collectionSettersMode = CollectionSettersMode.Private;
+            var doNotForceIsNullable = false;
 
             var options = new OptionSet {
                 { "h|help", "show this message and exit", v => showHelp = v != null },
@@ -53,7 +58,7 @@ A file name may be given by appending a pipe sign (|) followed by a file name (l
 If no mapping is found for an XML namespace, a name is generated automatically (may fail).", v => namespaces.Add(v) },
                 { "o|output=", "the {FOLDER} to write the resulting .cs files to", v => outputFolder = v },
                 { "i|integer=", @"map xs:integer and derived types to {TYPE} instead of automatic approximation
-{TYPE} can be i[nt], l[ong], or d[ecimal].", v => {
+{TYPE} can be i[nt], l[ong], or d[ecimal]", v => {
                                          switch (v)
                                          {
                                              case "i":
@@ -70,6 +75,7 @@ If no mapping is found for an XML namespace, a name is generated automatically (
                                                  break;
                                          }
                                      } },
+                { "fb|fallback|use-integer-type-as-fallback", "use integer type specified via -i only if no type can be deduced", v => useIntegerTypeAsFallback = v != null },
                 { "e|edb|enable-data-binding", "enable INotifyPropertyChanged data binding", v => enableDataBinding = v != null },
                 { "r|order", "emit order for all class members stored as XML element", v => emitOrder = v != null },
                 { "c|pcl", "PCL compatible output", v => pclCompatible = v != null },
@@ -83,6 +89,20 @@ If no mapping is found for an XML namespace, a name is generated automatically (
                 { "u|enableUpaCheck", "should XmlSchemaSet check for Unique Particle Attribution (UPA) (default is enabled)", v => enableUpaCheck = v != null },
                 { "ct|collectionType=", "collection type to use (default is " + typeof(Collection<>).FullName + ")", v => collectionType = v == null ? typeof(Collection<>) : Type.GetType(v, true) },
                 { "cit|collectionImplementationType=", "the default collection type implementation to use (default is null)", v => collectionImplementationType = v == null ? null : Type.GetType(v, true) },
+                { "csm|collectionSettersMode=", @"generate a private, public or public setters
+without backing field initialization for collections
+(default is Private; can be: {Private, Public, PublicWithoutConstructorInitialization})",
+                                        v =>
+                                        {
+                                            collectionSettersMode = v switch
+                                            {
+                                                "pr" or "Private" => CollectionSettersMode.Private,
+                                                "pu" or "Public" => CollectionSettersMode.Public,
+                                                "puwci" or "PublicWithoutConstructorInitialization" =>
+                                                    CollectionSettersMode.PublicWithoutConstructorInitialization,
+                                                _ => CollectionSettersMode.Private
+                                            };
+                                        }},
                 { "ctro|codeTypeReferenceOptions=", "the default CodeTypeReferenceOptions Flags to use (default is unset; can be: {GlobalReference, GenericTypeParameter})", v => codeTypeReferenceOptions = v == null ? default : (CodeTypeReferenceOptions)Enum.Parse(typeof(CodeTypeReferenceOptions), v, false) },
                 { "tvpn|textValuePropertyName=", "the name of the property that holds the text value of an element (default is Value)", v => textValuePropertyName = v },
                 { "dst|debuggerStepThrough", "generate DebuggerStepThroughAttribute (default is enabled)", v => generateDebuggerStepThroughAttribute = v != null },
@@ -91,6 +111,9 @@ If no mapping is found for an XML namespace, a name is generated automatically (
                 { "da|description", "generate DescriptionAttribute (default is true)", v => generateDescriptionAttribute = v != null },
                 { "cc|complexTypesForCollections", "generate complex types for collections (default is true)", v => generateComplexTypesForCollections = v != null },
                 { "s|useShouldSerialize", "use ShouldSerialize pattern instead of Specified pattern (default is false)", v => useShouldSerialize = v != null },
+                { "sf|separateFiles", "generate a separate file for each class (default is false)", v => separateClasses = v != null },
+                { "sg|separateSubstitutes", "generate a separate property for each element of a substitution group (default is false)", v => separateSubstitutes = v != null },
+                { "dnfin|doNotForceIsNullable", "do not force generator to emit IsNullable = true in XmlElement annotation for nillable elements when element is nullable (minOccurs < 1 or parent element is choice) (default is false)", v => doNotForceIsNullable = v != null }
             };
 
             var globsAndUris = options.Parse(args);
@@ -142,6 +165,7 @@ If no mapping is found for an XML namespace, a name is generated automatically (
                 EnableDataBinding = enableDataBinding,
                 EmitOrder = emitOrder,
                 IntegerDataType = integerType,
+                UseIntegerDataTypeAsFallback = useIntegerTypeAsFallback,
                 EntityFramework = entityFramework,
                 GenerateInterfaces = interfaces,
                 NamingScheme = pascal ? NamingScheme.PascalCase : NamingScheme.Direct,
@@ -156,7 +180,11 @@ If no mapping is found for an XML namespace, a name is generated automatically (
                 PrivateMemberPrefix = doNotUseUnderscoreInPrivateMemberNames ? "" : "_",
                 EnableUpaCheck = enableUpaCheck,
                 GenerateComplexTypesForCollections = generateComplexTypesForCollections,
-                UseShouldSerializePattern = useShouldSerialize
+                UseShouldSerializePattern = useShouldSerialize,
+                SeparateClasses = separateClasses,
+                CollectionSettersMode = collectionSettersMode,
+                DoNotForceIsNullable = doNotForceIsNullable,
+                SeparateSubstitutes = separateSubstitutes
             };
 
             if (pclCompatible)

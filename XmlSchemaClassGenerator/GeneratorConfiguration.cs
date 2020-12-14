@@ -33,6 +33,7 @@ namespace XmlSchemaClassGenerator
             GenerateSerializableAttribute = GenerateDesignerCategoryAttribute = true;
             CollectionType = typeof(Collection<>);
             MemberVisitor = (member, model) => { };
+            TypeVisitor = (type, model) => { };
             NamingProvider = new NamingProvider(NamingScheme);
             Version = VersionProvider.CreateFromAssembly();
             EnableUpaCheck = true;
@@ -135,6 +136,10 @@ namespace XmlSchemaClassGenerator
         /// </summary>
         public Type IntegerDataType { get; set; }
         /// <summary>
+        /// Use <see cref="IntegerDataType"/> only if no better type can be inferred
+        /// </summary>
+        public bool UseIntegerDataTypeAsFallback { get; set; }
+        /// <summary>
         /// Generate Entity Framework Code First compatible classes
         /// </summary>
         public bool EntityFramework { get; set; }
@@ -154,6 +159,10 @@ namespace XmlSchemaClassGenerator
         /// Generator Code reference options
         /// </summary>
         public CodeTypeReferenceOptions CodeTypeReferenceOptions { get; set; }
+        /// <summary>
+        /// Determines the kind of collection accessor modifiers to emit and controls baking collection fields initialization
+        /// </summary>
+        public CollectionSettersMode CollectionSettersMode { get; set; }
 
         /// <summary>
         /// The name of the property that will contain the text value of an XML element
@@ -186,11 +195,22 @@ namespace XmlSchemaClassGenerator
         public Action<CodeTypeMember, PropertyModel> MemberVisitor { get; set; }
 
         /// <summary>
+        /// Optional delegate that is called for each generated type (class, interface, enum)
+        /// </summary>
+        public Action<CodeTypeDeclaration, TypeModel> TypeVisitor { get; set; }
+
+        /// <summary>
         /// Provides options to customize Elementnamens with own logik
         /// </summary>
         public INamingProvider NamingProvider { get; set; }
 
         public bool DisableComments { get; set; }
+
+        /// <summary>
+        /// If True then do not force generator to emit IsNullable=true in XmlElement annotation
+        /// for nillable elements when element is nullable (minOccurs &lt; 1 or parent element is choice)
+        /// </summary>
+        public bool DoNotForceIsNullable { get; set; }
 
         public string PrivateMemberPrefix { get; set; } = "_";
 
@@ -244,5 +264,15 @@ namespace XmlSchemaClassGenerator
         /// </code>
         /// </summary>
         public bool GenerateComplexTypesForCollections { get; set; } = true;
+
+        /// <summary>
+        /// Separates each class into an individual file
+        /// </summary>
+        public bool SeparateClasses { get; set; } = false;
+
+        /// <summary>
+        /// Generates a separate property for each element of a substitution group
+        /// </summary>
+        public bool SeparateSubstitutes { get; set; } = false;
     }
 }

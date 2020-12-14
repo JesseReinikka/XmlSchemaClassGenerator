@@ -1,7 +1,7 @@
 XmlSchemaClassGenerator
 =======================
 
-[![NuGet version](https://badge.fury.io/nu/XmlSchemaClassGenerator-beta.svg)](http://badge.fury.io/nu/XmlSchemaClassGenerator-beta)
+[![Nuget](https://img.shields.io/nuget/v/XmlSchemaClassGenerator-beta)](https://www.nuget.org/packages/XmlSchemaClassGenerator-beta/)
 [![Build status](https://ci.appveyor.com/api/projects/status/yhxiw0stmv5y7f6n/branch/master?svg=true)](https://ci.appveyor.com/project/mganss/xmlschemaclassgenerator/branch/master)
 [![codecov.io](https://codecov.io/github/mganss/XmlSchemaClassGenerator/coverage.svg?branch=master)](https://codecov.io/github/mganss/XmlSchemaClassGenerator?branch=master)
 [![netstandard2.0](https://img.shields.io/badge/netstandard-2.0-brightgreen.svg)](https://img.shields.io/badge/netstandard-2.0-brightgreen.svg)
@@ -28,6 +28,7 @@ from schema restrictions
 * Optional support for [`INotifyPropertyChanged`](http://msdn.microsoft.com/en-us/library/system.componentmodel.inotifypropertychanged)
 * Optional support for Entity Framework Code First (automatically generate key properties)
 * Optionally generate interfaces for groups and attribute groups
+* Optionally generate one file per class
 
 Unsupported:
 
@@ -66,7 +67,10 @@ Options:
   -o, --output=FOLDER        the FOLDER to write the resulting .cs files to
   -i, --integer=TYPE         map xs:integer and derived types to TYPE instead
                                of automatic approximation
-                               TYPE can be i[nt], l[ong], or d[ecimal].
+                               TYPE can be i[nt], l[ong], or d[ecimal]
+      --fb, --fallback, --use-integer-type-as-fallback
+                             use integer type specified via -i only if no type
+                               can be deduced
   -e, --edb, --enable-data-binding
                              enable INotifyPropertyChanged data binding
   -r, --order                emit order for all class members stored as XML
@@ -94,6 +98,12 @@ Options:
       --cit, --collectionImplementationType=VALUE
                              the default collection type implementation to use (
                                default is null)
+      --csm, --collectionSettersMode=Private, Public, PublicWithoutConstructorInitialization
+                             generate a private, public or public setters
+                               without backing field initialization for
+                               collections
+                               (default is Private; can be: Private, Public,
+                               PublicWithoutConstructorInitialization)
       --ctro, --codeTypeReferenceOptions=GlobalReference, GenericTypeParameter
                              the default CodeTypeReferenceOptions Flags to use (
                                default is unset; can be: GlobalReference,
@@ -114,6 +124,16 @@ Options:
                                true)
   -s, --useShouldSerialize   use ShouldSerialize pattern instead of Specified
                                pattern (default is false)
+      --sf, --separateFiles  generate a separate file for each class (default
+                               is false)
+      --sg, --separateSubstitutes
+                             generate a separate property for each element of a
+                               substitution group (default is false)
+      --dnfin, --doNotForceIsNullable
+                             do not force generator to emit IsNullable = true
+                               in XmlElement annotation for nillable elements
+                               when element is nullable (minOccurs < 1 or
+                               parent element is choice) (default is false)
 ```
 
 For use from code use the [library NuGet package](https://www.nuget.org/packages/XmlSchemaClassGenerator-beta/):
@@ -278,7 +298,28 @@ the [`Type.GetType()`](https://docs.microsoft.com/en-us/dotnet/api/system.type.g
 Integer and derived types
 ---------------------
 Not all numeric types defined by XML Schema can be safely and accurately mapped to .NET numeric data types, however, it's possible to approximate the mapping based on the integer bounds and restrictions such as `totalDigits`.  
-If an explicit integer type mapping is specified via `--integer=TYPE`, that type will be used, otherwise an approximation will be made based on the following table:
+If an explicit integer type mapping is specified via `--integer=TYPE`, that type will be used, otherwise an approximation will be made based on the table below. If you additionally specify `--fallback`, the type specified via `--integer=TYPE` will be used only if no type can be deduced by applying the rules below.
+
+If the restrictions `minInclusive` and `maxInclusive` are present on the integer element, then the smallest CLR type that fully encompasses the specified range will be used. Unsigned types are given precedence over signed types. The following table shows the possible ranges and their corresponding CLR type, in the order they will be applied.
+
+<table>
+  <tr>
+    <th>Minimum (Inclusive)</th>
+	<th>Maximum (Inclusive)</th>
+	<th>C# type</th>
+	<tr><td>sbyte.MinValue</td><td>sbyte.MaxValue</td><td>sbyte</td></tr>
+	<tr><td>byte.MinValue</td><td>byte.MaxValue</td><td>byte</td></tr>
+	<tr><td>ushort.MinValue</td><td>ushort.MaxValue</td><td>ushort</td></tr>
+	<tr><td>short.MinValue</td><td>short.MaxValue</td><td>short</td></tr>
+	<tr><td>uint.MinValue</td><td>uint.MaxValue</td><td>uint</td></tr>
+	<tr><td>int.MinValue</td><td>int.MaxValue</td><td>int</td></tr>
+	<tr><td>ulong.MinValue</td><td>ulong.MaxValue</td><td>ulong</td></tr>
+	<tr><td>long.MinValue</td><td>long.MaxValue</td><td>long</td></tr>
+	<tr><td>decimal.MinValue</td><td>decimal.MaxValue</td><td>decimal</td></tr>
+  </tr>
+</table>
+
+If the range specified by `minInclusive` and `maxInclusive` does not fit in any CLR type, or if those restrictions are not present, then the `totalDigits` restriction will be used, as shown in the following table.
 
 <table>
   <tr>
